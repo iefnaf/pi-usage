@@ -1,6 +1,6 @@
 {
   "name": "pi-usage",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "/usage command for pi – shows current provider's daily & weekly limits",
   "keywords": [
     "pi-package",

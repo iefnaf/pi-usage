@@ -3,19 +3,21 @@
  *
  * Provides a single /usage command that shows the current provider's
  * daily (session) and weekly limits in a TUI panel.
+ *
+ * Auth is resolved through the runtime's ModelRegistry, which handles OAuth
+ * refresh (Codex) and env API keys (Z.AI, Kimi) uniformly.
  */
 
-import { AuthStorage, DynamicBorder, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { DynamicBorder, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { matchesKey, Container, Spacer, Text, type Focusable } from "@mariozechner/pi-tui";
 import {
   clampPercent,
   colorForPercent,
   detectProvider,
-  fetchClaudeUsage,
   fetchCodexUsage,
-  fetchGoogleUsage,
+  fetchKimiUsage,
   fetchZaiUsage,
-  providerToOAuthProviderId,
+  providerToProviderId,
   resolveUsageEndpoints,
   type ProviderKey,
   type UsageData,
@@ -26,10 +28,8 @@ import {
 
 const PROVIDER_LABELS: Record<ProviderKey, string> = {
   codex: "Codex",
-  claude: "Claude",
   zai: "Z.AI",
-  gemini: "Gemini",
-  antigravity: "Antigravity",
+  kimi: "Kimi",
 };
 
 // ── Self-managing usage panel ────────────────────────────────────
@@ -199,55 +199,20 @@ function renderBar(theme: any, value: number, width = 20): string {
   return theme.fg(colorForPercent(v), full) + theme.fg("dim", empty);
 }
 
-async function getAccessToken(providerId: string): Promise<string | null> {
-  try {
-    const auth = AuthStorage.create();
-    return (await auth.getApiKey(providerId)) ?? null;
-  } catch {
-    return null;
-  }
-}
-
 async function fetchProviderUsage(
   provider: ProviderKey,
+  token: string,
   endpoints: UsageEndpoints,
-): Promise<UsageData | null> {
-  const oauthId = providerToOAuthProviderId(provider);
-
+): Promise<UsageData> {
   switch (provider) {
-    case "codex": {
-      const access = oauthId ? await getAccessToken(oauthId) : null;
-      return access
-        ? fetchCodexUsage(access)
-        : { session: 0, weekly: 0, error: "missing access token (try /login again)" };
-    }
-    case "claude": {
-      const access = oauthId ? await getAccessToken(oauthId) : null;
-      return access
-        ? fetchClaudeUsage(access)
-        : { session: 0, weekly: 0, error: "missing access token (try /login again)" };
-    }
-    case "zai": {
-      const token = process.env.ZAI_API_KEY || (oauthId ? await getAccessToken(oauthId) : null);
-      return token
-        ? fetchZaiUsage(token, { endpoints })
-        : { session: 0, weekly: 0, error: "missing token (set ZAI_API_KEY or try /login again)" };
-    }
-    case "gemini": {
-      const access = oauthId ? await getAccessToken(oauthId) : null;
-      // AuthStorage manages projectId internally via auth.json
-      return access
-        ? fetchGoogleUsage(access, endpoints.gemini, undefined, "gemini", { endpoints })
-        : { session: 0, weekly: 0, error: "missing access token (try /login again)" };
-    }
-    case "antigravity": {
-      const access = oauthId ? await getAccessToken(oauthId) : null;
-      return access
-        ? fetchGoogleUsage(access, endpoints.antigravity, undefined, "antigravity", { endpoints })
-        : { session: 0, weekly: 0, error: "missing access token (try /login again)" };
-    }
+    case "codex":
+      return fetchCodexUsage(token);
+    case "zai":
+      return fetchZaiUsage(token, { endpoints });
+    case "kimi":
+      return fetchKimiUsage(token, { endpoints });
     default:
-      return null;
+      return { session: 0, weekly: 0, error: `unsupported provider: ${provider}` };
   }
 }
 
@@ -263,32 +228,26 @@ export default function (pi: ExtensionAPI) {
 
       const provider = detectProvider(ctx.model);
       if (!provider) {
-        ctx.ui.notify(
-          "Cannot detect current provider – usage data unavailable",
-          "warning",
-        );
+        ctx.ui.notify("Cannot detect current provider – usage data unavailable", "warning");
         return;
       }
 
-      const auth = AuthStorage.create();
-      const oauthId = providerToOAuthProviderId(provider);
-
-      // Z.AI uses ZAI_API_KEY env var, not OAuth
-      if (provider === "zai" && !process.env.ZAI_API_KEY && !(oauthId && auth.hasAuth(oauthId))) {
-        ctx.ui.notify("No ZAI_API_KEY found (set env var or run /login)", "warning");
+      const providerId = providerToProviderId(provider);
+      if (!providerId) {
+        ctx.ui.notify("Cannot detect current provider – usage data unavailable", "warning");
         return;
       }
 
-      if (provider !== "zai" && oauthId && !auth.hasAuth(oauthId)) {
-        ctx.ui.notify(
-          `No credentials found for ${PROVIDER_LABELS[provider] ?? provider}`,
-          "warning",
-        );
+      // ModelRegistry resolves OAuth tokens (with refresh) and env API keys.
+      const token = await ctx.modelRegistry.getApiKeyForProvider(providerId);
+      if (!token) {
+        const label = PROVIDER_LABELS[provider] ?? provider;
+        ctx.ui.notify(`No credentials found for ${label} (run /login or set the API key)`, "warning");
         return;
       }
 
       await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-        const fetchPromise = fetchProviderUsage(provider, endpoints);
+        const fetchPromise = fetchProviderUsage(provider, token, endpoints);
         return new UsagePanelComponent(tui, theme, provider, fetchPromise, () => done());
       });
     },

@@ -23,10 +23,12 @@ A panel appears showing the current provider's daily and weekly limits with prog
 | Provider | Auth Method |
 |----------|-------------|
 | Codex (OpenAI) | OAuth (`/login`) |
-| Anthropic (Claude) | OAuth (`/login`) |
-| Z.AI | API key |
-| Gemini CLI | OAuth (`/login`) |
-| Antigravity (Google) | OAuth (`/login`) |
+| Z.AI | API key (`ZAI_API_KEY`) |
+| Kimi For Coding | API key (`KIMI_API_KEY`) |
+
+Usage is shown for the **current** provider. Auth (including Codex OAuth
+refresh and env API keys) is resolved through pi's model registry, so as long
+as the active model is working, `/usage` can read its limits.
 
 ## Credits
 
