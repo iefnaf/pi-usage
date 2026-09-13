@@ -5,8 +5,8 @@
  * daily (session) and weekly limits in a TUI panel.
  */
 
-import { AuthStorage, DynamicBorder, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { matchesKey, Container, Spacer, Text, type Focusable } from "@mariozechner/pi-tui";
+import { AuthStorage, DynamicBorder, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { matchesKey, Container, Spacer, Text, type Focusable } from "@earendil-works/pi-tui";
 import {
   clampPercent,
   colorForPercent,
