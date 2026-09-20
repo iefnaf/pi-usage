@@ -14,6 +14,7 @@ import {
   fetchClaudeUsage,
   fetchCodexUsage,
   fetchGoogleUsage,
+  fetchOpencodeGoUsage,
   fetchZaiUsage,
   providerToOAuthProviderId,
   resolveUsageEndpoints,
@@ -30,6 +31,7 @@ const PROVIDER_LABELS: Record<ProviderKey, string> = {
   zai: "Z.AI",
   gemini: "Gemini",
   antigravity: "Antigravity",
+  "opencode-go": "OpenCode Go",
 };
 
 // ── Self-managing usage panel ────────────────────────────────────
@@ -122,6 +124,8 @@ class UsagePanelComponent extends Container implements Focusable {
         new Text("  " + t.fg("error", `Error: ${data.error}`), 0, 0),
       );
     } else {
+      const isGo = provider === "opencode-go";
+      const sessionLabel = isGo ? "Rolling  " : "Daily    ";
       const session = clampPercent(data.session);
       const sessionReset = data.sessionResetsIn
         ? t.fg("dim", `  resets in ${data.sessionResetsIn}`)
@@ -129,7 +133,7 @@ class UsagePanelComponent extends Container implements Focusable {
       this.contentContainer.addChild(
         new Text(
           "  " +
-            t.fg("muted", "Daily    ") +
+            t.fg("muted", sessionLabel) +
             renderBar(t, session) +
             " " +
             t.fg(colorForPercent(session), `${session}%`.padStart(4)) +
@@ -155,6 +159,25 @@ class UsagePanelComponent extends Container implements Focusable {
           0,
         ),
       );
+
+      if (typeof data.monthly === "number") {
+        const monthly = clampPercent(data.monthly);
+        const monthlyReset = data.monthlyResetsIn
+          ? t.fg("dim", `  resets in ${data.monthlyResetsIn}`)
+          : "";
+        this.contentContainer.addChild(
+          new Text(
+            "  " +
+              t.fg("muted", "Monthly  ") +
+              renderBar(t, monthly) +
+              " " +
+              t.fg(colorForPercent(monthly), `${monthly}%`.padStart(4)) +
+              monthlyReset,
+            0,
+            0,
+          ),
+        );
+      }
 
       if (typeof data.extraSpend === "number" && typeof data.extraLimit === "number") {
         this.contentContainer.addChild(
@@ -246,6 +269,12 @@ async function fetchProviderUsage(
         ? fetchGoogleUsage(access, endpoints.antigravity, undefined, "antigravity", { endpoints })
         : { session: 0, weekly: 0, error: "missing access token (try /login again)" };
     }
+    case "opencode-go": {
+      const apiKey = await getAccessToken("opencode-go");
+      return apiKey
+        ? fetchOpencodeGoUsage(apiKey, { endpoints })
+        : { session: 0, weekly: 0, error: "missing API key (connect OpenCode Go to get a key)" };
+    }
     default:
       return null;
   }
@@ -279,7 +308,13 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (provider !== "zai" && oauthId && !auth.hasAuth(oauthId)) {
+      // OpenCode Go uses an API key (sk-...) stored as "opencode-go", not OAuth
+      if (provider === "opencode-go" && !auth.hasAuth("opencode-go")) {
+        ctx.ui.notify("No OpenCode Go API key found (connect OpenCode Go to get a key)", "warning");
+        return;
+      }
+
+      if (provider !== "zai" && provider !== "opencode-go" && oauthId && !auth.hasAuth(oauthId)) {
         ctx.ui.notify(
           `No credentials found for ${PROVIDER_LABELS[provider] ?? provider}`,
           "warning",

@@ -1,6 +1,6 @@
 # pi-usage
 
-A lightweight pi extension that provides a single `/usage` command to display the **current provider's** daily and weekly usage limits.
+A lightweight pi extension that provides a single `/usage` command to display the **current provider's** usage limits (daily & weekly, plus monthly for OpenCode Go).
 
 ## Install
 
@@ -16,7 +16,7 @@ In pi, type:
 /usage
 ```
 
-A panel appears showing the current provider's daily and weekly limits with progress bars. Press Enter or Escape to close.
+A panel appears showing the current provider's usage limits with progress bars (Rolling/Weekly/Monthly for OpenCode Go, Daily/Weekly otherwise). Press Enter or Escape to close.
 
 ## Supported Providers
 
@@ -27,6 +27,7 @@ A panel appears showing the current provider's daily and weekly limits with prog
 | Z.AI | API key |
 | Gemini CLI | OAuth (`/login`) |
 | Antigravity (Google) | OAuth (`/login`) |
+| OpenCode Go | API key (`/connect` → OpenCode Go) |
 
 ## Credits
 

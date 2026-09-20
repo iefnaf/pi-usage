@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 
-export type ProviderKey = "codex" | "claude" | "zai" | "gemini" | "antigravity";
+export type ProviderKey = "codex" | "claude" | "zai" | "gemini" | "antigravity" | "opencode-go";
 export type OAuthProviderId = "openai-codex" | "anthropic" | "google-gemini-cli" | "google-antigravity";
 
 export interface AuthData {
@@ -11,6 +11,7 @@ export interface AuthData {
   zai?: { key?: string; access?: string; refresh?: string; expires?: number };
   "google-gemini-cli"?: { access?: string; refresh?: string; projectId?: string; expires?: number };
   "google-antigravity"?: { access?: string; refresh?: string; projectId?: string; expires?: number };
+  "opencode-go"?: { key?: string; access?: string; type?: string };
 }
 
 export interface UsageData {
@@ -18,6 +19,8 @@ export interface UsageData {
   weekly: number;
   sessionResetsIn?: string;
   weeklyResetsIn?: string;
+  monthly?: number;
+  monthlyResetsIn?: string;
   extraSpend?: number;
   extraLimit?: number;
   error?: string;
@@ -29,6 +32,7 @@ export interface UsageEndpoints {
   zai: string;
   gemini: string;
   antigravity: string;
+  opencodeGo: string;
   googleLoadCodeAssistEndpoints: string[];
 }
 
@@ -84,6 +88,7 @@ const TOKEN_REFRESH_SKEW_MS = 60_000;
 
 export const DEFAULT_AUTH_FILE = path.join(os.homedir(), ".pi", "agent", "auth.json");
 export const DEFAULT_ZAI_USAGE_ENDPOINT = "https://api.z.ai/api/monitor/usage/quota/limit";
+export const DEFAULT_OPENCODE_GO_USAGE_ENDPOINT = "https://opencode.ai/zen/go/v1/usage";
 export const GOOGLE_QUOTA_ENDPOINT = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
 export const GOOGLE_LOAD_CODE_ASSIST_ENDPOINTS = [
   "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
@@ -95,6 +100,7 @@ export function resolveUsageEndpoints(): UsageEndpoints {
     zai: DEFAULT_ZAI_USAGE_ENDPOINT,
     gemini: GOOGLE_QUOTA_ENDPOINT,
     antigravity: GOOGLE_QUOTA_ENDPOINT,
+    opencodeGo: DEFAULT_OPENCODE_GO_USAGE_ENDPOINT,
     googleLoadCodeAssistEndpoints: GOOGLE_LOAD_CODE_ASSIST_ENDPOINTS,
   };
 }
@@ -552,6 +558,48 @@ export async function fetchGoogleUsage(
   return parsed;
 }
 
+export async function fetchOpencodeGoUsage(apiKey: string, config: FetchConfig = {}): Promise<UsageData> {
+  const endpoint = (config.endpoints ?? resolveUsageEndpoints()).opencodeGo || DEFAULT_OPENCODE_GO_USAGE_ENDPOINT;
+  if (!endpoint) return { session: 0, weekly: 0, error: "usage endpoint unavailable" };
+
+  const result = await requestJson(
+    endpoint,
+    { headers: { Authorization: `Bearer ${apiKey}` } },
+    config,
+  );
+
+  if (!result.ok) return { session: 0, weekly: 0, error: (result as { ok: false; error: string }).error };
+
+  const usage = result.data?.usage;
+  if (!usage) return { session: 0, weekly: 0, error: "unrecognized response shape" };
+
+  const rolling = usage.rolling ?? usage.rolling5h ?? usage.session ?? usage.daily;
+  const weekly = usage.weekly ?? usage.weeklyUsage ?? usage.seven_day;
+  const monthly = usage.monthly ?? usage.monthlyUsage;
+
+  const session = readPercentCandidate(rolling?.percent ?? rolling?.usagePercent ?? rolling);
+  const weeklyPct = readPercentCandidate(weekly?.percent ?? weekly?.usagePercent ?? weekly);
+  const monthlyPct = readPercentCandidate(monthly?.percent ?? monthly?.usagePercent ?? monthly);
+
+  if (session == null || weeklyPct == null) {
+    return { session: 0, weekly: 0, error: "unrecognized response shape" };
+  }
+
+  const out: UsageData = {
+    ...normalizeUsagePair(session, weeklyPct),
+  };
+  const rollingReset = rolling?.resetsAt ?? rolling?.resetAt ?? rolling?.resets_at;
+  const weeklyReset = weekly?.resetsAt ?? weekly?.resetAt ?? weekly?.resets_at;
+  const monthlyReset = monthly?.resetsAt ?? monthly?.resetAt ?? monthly?.resets_at;
+  if (typeof rollingReset === "string" && rollingReset) out.sessionResetsIn = formatResetsAt(rollingReset);
+  if (typeof weeklyReset === "string" && weeklyReset) out.weeklyResetsIn = formatResetsAt(weeklyReset);
+  if (monthlyPct != null) {
+    out.monthly = clampPercent(monthlyPct);
+    if (typeof monthlyReset === "string" && monthlyReset) out.monthlyResetsIn = formatResetsAt(monthlyReset);
+  }
+  return out;
+}
+
 export function detectProvider(
   model: { provider?: string; id?: string; name?: string; api?: string } | string | undefined | null,
 ): ProviderKey | null {
@@ -565,6 +613,7 @@ export function detectProvider(
   if (provider === "zai") return "zai";
   if (provider === "google-gemini-cli") return "gemini";
   if (provider === "google-antigravity") return "antigravity";
+  if (provider === "opencode-go" || provider === "opencode") return "opencode-go";
 
   return null;
 }
@@ -581,6 +630,8 @@ export function canShowForProvider(active: ProviderKey | null, auth: AuthData | 
   if (!active || !auth) return false;
   if (active === "codex") return !!(auth["openai-codex"]?.access || auth["openai-codex"]?.refresh);
   if (active === "claude") return !!(auth.anthropic?.access || auth.anthropic?.refresh);
+  if (active === "opencode-go")
+    return !!((auth as AuthData)["opencode-go"]?.key || (auth as AuthData)["opencode-go"]?.access) && !!endpoints.opencodeGo;
   if (active === "zai") return !!(auth.zai?.access || auth.zai?.key) && !!endpoints.zai;
   if (active === "gemini") {
     return !!(auth["google-gemini-cli"]?.access || auth["google-gemini-cli"]?.refresh) && !!endpoints.gemini;
@@ -613,6 +664,7 @@ export async function fetchAllUsages(config: FetchAllUsagesConfig = {}): Promise
     zai: null,
     gemini: null,
     antigravity: null,
+    "opencode-go": null,
   };
 
   if (!auth) return results;
@@ -664,6 +716,12 @@ export async function fetchAllUsages(config: FetchAllUsagesConfig = {}): Promise
 
   if (authData.zai?.access || authData.zai?.key) {
     assign("zai", fetchZaiUsage(authData.zai.access || authData.zai.key!, { ...config, endpoints }));
+  }
+
+  const goCreds = (authData as AuthData)["opencode-go"];
+  const goKey = goCreds?.access || goCreds?.key;
+  if (goKey) {
+    assign("opencode-go", fetchOpencodeGoUsage(goKey, { ...config, endpoints }));
   }
 
   if (authData["google-gemini-cli"]?.access) {

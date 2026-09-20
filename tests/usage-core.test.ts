@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   detectProvider,
   fetchCodexUsage,
+  fetchOpencodeGoUsage,
   type FetchLike,
   type FetchResponseLike,
 } from "../extensions/usage/core.ts";
@@ -71,5 +72,52 @@ describe("usage core Codex support", () => {
       fetchFn: async () => invalidJsonResponse(),
     });
     expect(badJson.error).toBe("invalid JSON response");
+  });
+});
+
+describe("usage core OpenCode Go support", () => {
+  it("detects opencode-go models as OpenCode Go", () => {
+    expect(detectProvider({ provider: "opencode-go", id: "kimi-k2.7-code" })).toBe("opencode-go");
+    expect(detectProvider({ provider: "opencode", id: "glm-5.2" })).toBe("opencode-go");
+  });
+
+  it("fetches rolling, weekly and monthly usage from Zen Go endpoint", async () => {
+    const calls: Array<{ url: string; authorization: string }> = [];
+    const fetchFn: FetchLike = async (url, init) => {
+      calls.push({
+        url,
+        authorization: String((init?.headers as any)?.Authorization ?? ""),
+      });
+
+      return jsonResponse(200, {
+        usage: {
+          rolling: { status: "ok", percent: 5, resetsAt: new Date(Date.now() + 3600_000).toISOString() },
+          weekly: { status: "ok", percent: 27, resetsAt: new Date(Date.now() + 86400_000).toISOString() },
+          monthly: { status: "ok", percent: 13, resetsAt: new Date(Date.now() + 86400_000 * 30).toISOString() },
+        },
+      });
+    };
+
+    const usage = await fetchOpencodeGoUsage("sk-test", { fetchFn });
+
+    expect(calls).toEqual([
+      {
+        url: "https://opencode.ai/zen/go/v1/usage",
+        authorization: "Bearer sk-test",
+      },
+    ]);
+    expect(usage.session).toBe(5);
+    expect(usage.weekly).toBe(27);
+    expect(usage.monthly).toBe(13);
+    expect(typeof usage.sessionResetsIn).toBe("string");
+    expect(typeof usage.weeklyResetsIn).toBe("string");
+    expect(typeof usage.monthlyResetsIn).toBe("string");
+  });
+
+  it("returns explicit OpenCode Go errors for HTTP failures", async () => {
+    const badHttp = await fetchOpencodeGoUsage("sk-test", {
+      fetchFn: async () => jsonResponse(401, {}),
+    });
+    expect(badHttp.error).toBe("HTTP 401");
   });
 });
