@@ -5,7 +5,8 @@
  * daily (session) and weekly limits in a TUI panel.
  *
  * Auth is resolved through the runtime's ModelRegistry, which handles OAuth
- * refresh (Codex) and env API keys (Z.AI, Kimi) uniformly.
+ * refresh (Codex) and env API keys (Z.AI, Kimi) uniformly. Claude, served by
+ * pi-claude-bridge through Claude Code, uses Claude Code's own login instead.
  */
 
 import { DynamicBorder, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -14,10 +15,12 @@ import {
   clampPercent,
   colorForPercent,
   detectProvider,
+  fetchClaudeUsage,
   fetchCodexUsage,
   fetchKimiUsage,
   fetchZaiUsage,
   providerToProviderId,
+  readClaudeCodeToken,
   resolveUsageEndpoints,
   type ProviderKey,
   type UsageData,
@@ -30,6 +33,7 @@ const PROVIDER_LABELS: Record<ProviderKey, string> = {
   codex: "Codex",
   zai: "Z.AI",
   kimi: "Kimi",
+  claude: "Claude",
 };
 
 // ── Self-managing usage panel ────────────────────────────────────
@@ -211,6 +215,8 @@ async function fetchProviderUsage(
       return fetchZaiUsage(token, { endpoints });
     case "kimi":
       return fetchKimiUsage(token, { endpoints });
+    case "claude":
+      return fetchClaudeUsage(token);
     default:
       return { session: 0, weekly: 0, error: `unsupported provider: ${provider}` };
   }
@@ -238,8 +244,19 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // ModelRegistry resolves OAuth tokens (with refresh) and env API keys.
-      const token = await ctx.modelRegistry.getApiKeyForProvider(providerId);
+      let token: string | undefined;
+      if (provider === "claude") {
+        // pi-claude-bridge registers no real key; the login belongs to Claude Code.
+        const credential = readClaudeCodeToken();
+        if ("error" in credential) {
+          ctx.ui.notify(credential.error, "warning");
+          return;
+        }
+        token = credential.token;
+      } else {
+        // ModelRegistry resolves OAuth tokens (with refresh) and env API keys.
+        token = await ctx.modelRegistry.getApiKeyForProvider(providerId);
+      }
       if (!token) {
         const label = PROVIDER_LABELS[provider] ?? provider;
         ctx.ui.notify(`No credentials found for ${label} (run /login or set the API key)`, "warning");
