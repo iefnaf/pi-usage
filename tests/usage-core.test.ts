@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import {
+  CLAUDE_USAGE_ENDPOINT,
   detectProvider,
+  fetchClaudeUsage,
   fetchCodexUsage,
   fetchKimiUsage,
+  readClaudeCodeToken,
   type FetchLike,
   type FetchResponseLike,
 } from "../extensions/usage/core.ts";
@@ -34,6 +37,10 @@ describe("usage core provider detection", () => {
   it("detects zai and kimi-coding providers", () => {
     expect(detectProvider({ provider: "zai", id: "glm-4.6" })).toBe("zai");
     expect(detectProvider({ provider: "kimi-coding", id: "k2p7" })).toBe("kimi");
+  });
+
+  it("detects pi-claude-bridge models as Claude", () => {
+    expect(detectProvider({ provider: "claude-bridge", id: "claude-opus-5-5" })).toBe("claude");
   });
 
   it("returns null for unsupported/removed providers", () => {
@@ -146,5 +153,104 @@ describe("usage core Kimi support", () => {
       fetchFn: async () => invalidJsonResponse(),
     });
     expect(badJson.error).toBe("invalid JSON response");
+  });
+});
+
+describe("usage core Claude support", () => {
+  // Trimmed from a live /api/oauth/usage response.
+  const inTwoHours = new Date(Date.now() + 2 * 3600_000 + 30_000).toISOString();
+  const inThreeDays = new Date(Date.now() + 3 * 86400_000 + 30_000).toISOString();
+  const claudeBody = (extraUsage: any) => ({
+    five_hour: { utilization: 11.0, resets_at: inTwoHours },
+    seven_day: { utilization: 16.0, resets_at: inThreeDays },
+    seven_day_opus: null,
+    extra_usage: extraUsage,
+  });
+
+  it("fetches 5h and 7d utilization from /api/oauth/usage with the OAuth beta header", async () => {
+    const calls: Array<{ url: string; headers: any }> = [];
+    const fetchFn: FetchLike = async (url, init) => {
+      calls.push({ url, headers: init?.headers });
+      return jsonResponse(200, claudeBody({ is_enabled: false, monthly_limit: 19700, used_credits: 0, decimal_places: 2 }));
+    };
+
+    const usage = await fetchClaudeUsage("claude-token", { fetchFn });
+
+    expect(calls).toEqual([
+      {
+        url: CLAUDE_USAGE_ENDPOINT,
+        headers: { Authorization: "Bearer claude-token", "anthropic-beta": "oauth-2025-04-20" },
+      },
+    ]);
+    expect(usage).toEqual({ session: 11, weekly: 16, sessionResetsIn: "2h", weeklyResetsIn: "3d" });
+  });
+
+  it("reads utilization as a percent, not a fraction", async () => {
+    const fetchFn: FetchLike = async () =>
+      jsonResponse(200, { five_hour: { utilization: 0.5 }, seven_day: { utilization: 1 } });
+    const usage = await fetchClaudeUsage("t", { fetchFn });
+    expect(usage.session).toBe(0.5);
+    expect(usage.weekly).toBe(1);
+  });
+
+  it("reports enabled extra usage in currency units", async () => {
+    const fetchFn: FetchLike = async () =>
+      jsonResponse(200, claudeBody({ is_enabled: true, monthly_limit: 19700, used_credits: 1234, decimal_places: 2 }));
+    const usage = await fetchClaudeUsage("t", { fetchFn });
+    expect(usage.extraSpend).toBe(12.34);
+    expect(usage.extraLimit).toBe(197);
+  });
+
+  it("returns explicit Claude errors for HTTP, invalid JSON, and unknown shapes", async () => {
+    expect(await fetchClaudeUsage("t", { fetchFn: async () => jsonResponse(401, {}) })).toEqual({
+      session: 0, weekly: 0, error: "HTTP 401",
+    });
+    expect(await fetchClaudeUsage("t", { fetchFn: async () => invalidJsonResponse() })).toEqual({
+      session: 0, weekly: 0, error: "invalid JSON response",
+    });
+    expect(await fetchClaudeUsage("t", { fetchFn: async () => jsonResponse(200, {}) })).toEqual({
+      session: 0, weekly: 0, error: "unrecognized response shape",
+    });
+  });
+});
+
+describe("Claude Code credentials", () => {
+  const now = 1_790_000_000_000;
+  const creds = (accessToken: string, expiresAt = now + 3600_000) =>
+    JSON.stringify({ claudeAiOauth: { accessToken, refreshToken: "r", expiresAt } });
+  const missing = () => {
+    throw new Error("not found");
+  };
+
+  it("reads the macOS keychain item Claude Code writes", () => {
+    const services: string[] = [];
+    const result = readClaudeCodeToken({
+      platform: "darwin",
+      now,
+      readKeychain: (service) => (services.push(service), creds("from-keychain")),
+      readFile: missing,
+    });
+    expect(result).toEqual({ token: "from-keychain" });
+    expect(services).toEqual(["Claude Code-credentials"]);
+  });
+
+  it("falls back to .credentials.json in CLAUDE_CONFIG_DIR, or ~/.claude", () => {
+    const paths: string[] = [];
+    const readFile = (path: string) => (paths.push(path), creds("from-file"));
+    expect(readClaudeCodeToken({ platform: "linux", env: {}, home: "/home/u", now, readFile })).toEqual({ token: "from-file" });
+    expect(readClaudeCodeToken({ platform: "darwin", env: { CLAUDE_CONFIG_DIR: "/cfg" }, now, readKeychain: missing, readFile })).toEqual({ token: "from-file" });
+    expect(paths).toEqual(["/home/u/.claude/.credentials.json", "/cfg/.credentials.json"]);
+  });
+
+  it("reports an expired login instead of refreshing it", () => {
+    const result = readClaudeCodeToken({ platform: "linux", env: {}, now, readFile: () => creds("old", now - 1) });
+    expect("error" in result && result.error).toMatch(/expired/);
+  });
+
+  it("reports a missing or unreadable login", () => {
+    expect(readClaudeCodeToken({ platform: "linux", env: {}, now, readFile: missing })).toEqual({
+      error: "Claude Code login not found; run `claude` and log in",
+    });
+    expect("error" in readClaudeCodeToken({ platform: "linux", env: {}, now, readFile: () => "{not json" })).toBe(true);
   });
 });
